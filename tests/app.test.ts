@@ -13,6 +13,7 @@ import type {
   PreReservation,
   ReservationImage,
   Service,
+  TimeRange,
   WebhookEvent
 } from '../src/types/domain.js';
 
@@ -38,6 +39,40 @@ describe('booking backend', () => {
       endsAt: '2099-01-05T14:00:00.000Z',
       timezone: 'UTC'
     });
+  });
+
+  it('diagnoses slots blocked by Google Calendar busy ranges', async () => {
+    const repo = new InMemoryRepository();
+    const app = createApp(
+      testDependencies(repo, {
+        googleBusy: [{ start: new Date('2099-01-05T13:00:00.000Z'), end: new Date('2099-01-05T14:00:00.000Z') }]
+      })
+    );
+
+    const response = await request(app)
+      .get('/api/v1/admin/availability/diagnostics')
+      .set('X-Admin-Api-Key', 'change-me')
+      .query({
+        serviceId,
+        from: '2099-01-05T00:00:00.000Z',
+        to: '2099-01-06T00:00:00.000Z',
+        timezone: 'UTC'
+      })
+      .expect(200);
+
+    expect(response.body.data.counts.googleBusy).toBe(1);
+    expect(response.body.data.slots).not.toContainEqual({
+      startsAt: '2099-01-05T13:00:00.000Z',
+      endsAt: '2099-01-05T14:00:00.000Z',
+      timezone: 'UTC'
+    });
+    expect(response.body.data.candidates).toContainEqual(
+      expect.objectContaining({
+        startsAt: '2099-01-05T13:00:00.000Z',
+        available: false,
+        blockedBy: ['googleCalendar']
+      })
+    );
   });
 
   it('creates a pre-reservation and protects it with the customer token', async () => {
@@ -101,12 +136,12 @@ describe('booking backend', () => {
   });
 });
 
-function testDependencies(repository: InMemoryRepository): AppDependencies {
+function testDependencies(repository: InMemoryRepository, options: { googleBusy?: TimeRange[] } = {}): AppDependencies {
   return {
     repository,
     googleCalendar: {
       healthCheck: async () => undefined,
-      freeBusy: async () => [],
+      freeBusy: async () => options.googleBusy ?? [],
       createEvent: async () => ({
         googleEventId: 'calendar_event_test',
         htmlLink: 'https://calendar.example/event',

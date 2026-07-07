@@ -250,6 +250,15 @@ export function createApp(dependencies: AppDependencies): express.Express {
   admin.delete('/services/:id', crudDelete(dependencies.repository.deleteService.bind(dependencies.repository)));
 
   admin.get(
+    '/availability/diagnostics',
+    validateQuery(availabilityQuerySchema),
+    asyncHandler(async (req, res) => {
+      const query = availabilityQuerySchema.parse(req.query);
+      res.json({ data: await availability.diagnoseSlots(query.serviceId, query.from, query.to, query.timezone) });
+    })
+  );
+
+  admin.get(
     '/availability-rules',
     asyncHandler(async (_req, res) => {
       res.json({ data: await dependencies.repository.listAvailabilityRules() });
