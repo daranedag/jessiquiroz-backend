@@ -134,6 +134,85 @@ describe('booking backend', () => {
     expect(payment.body.data.preferenceId).toBe('pref_test');
     expect(payment.body.data.initPoint).toBe('https://mercadopago.example/checkout');
   });
+
+  it('accepts Mercado Pago webhook payment ids from query params', async () => {
+    const repo = new InMemoryRepository();
+    const app = createApp(testDependencies(repo));
+
+    await request(app)
+      .post('/api/v1/pre-reservations')
+      .send({
+        serviceId,
+        startsAt: '2099-01-05T13:00:00.000Z',
+        timezone: 'UTC',
+        client: {
+          fullName: 'Katherine Johnson',
+          email: 'katherine@example.com',
+          formData: {}
+        }
+      })
+      .expect(201);
+
+    await request(app)
+      .post('/api/v1/webhooks/mercadopago?data.id=mp_payment_query&type=payment')
+      .send({ type: 'payment' })
+      .expect(200);
+
+    expect(repo.webhookEvents[0]).toEqual(
+      expect.objectContaining({
+        event_key: 'payment:mp_payment_query',
+        processed_at: expect.any(String)
+      })
+    );
+    expect(repo.payments[0]).toEqual(
+      expect.objectContaining({
+        mercado_pago_payment_id: 'mp_payment_query',
+        status: 'approved'
+      })
+    );
+    expect(repo.bookings).toHaveLength(1);
+  });
+
+  it('accepts Mercado Pago dashboard test notifications without fetching a payment', async () => {
+    const repo = new InMemoryRepository();
+    const app = createApp(testDependencies(repo));
+
+    const response = await request(app)
+      .post('/api/v1/webhooks/mercadopago?data.id=123456&type=payment')
+      .send({ type: 'payment' })
+      .expect(200);
+
+    expect(response.body).toEqual({ ok: true, processed: false });
+    expect(repo.webhookEvents[0]).toEqual(
+      expect.objectContaining({
+        event_key: 'payment:123456',
+        processed_at: expect.any(String)
+      })
+    );
+    expect(repo.payments).toHaveLength(0);
+    expect(repo.bookings).toHaveLength(0);
+  });
+
+  it('maps Mercado Pago lookup failures to an external provider error', async () => {
+    const repo = new InMemoryRepository();
+    const dependencies = testDependencies(repo);
+    dependencies.mercadoPago.getPayment = async () => {
+      throw { message: 'Payment not found' };
+    };
+    const app = createApp(dependencies);
+
+    const response = await request(app)
+      .post('/api/v1/webhooks/mercadopago')
+      .send({ type: 'payment', data: { id: 'mp_missing' } })
+      .expect(502);
+
+    expect(response.body.error).toEqual(
+      expect.objectContaining({
+        code: 'mercadopago_error',
+        message: 'Mercado Pago request failed: Payment not found'
+      })
+    );
+  });
 });
 
 function testDependencies(repository: InMemoryRepository, options: { googleBusy?: TimeRange[] } = {}): AppDependencies {

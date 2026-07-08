@@ -222,7 +222,7 @@ export function createApp(dependencies: AppDependencies): express.Express {
     webhookLimiter,
     validateBody(mercadoPagoWebhookSchema),
     asyncHandler(async (req, res) => {
-      const result = await confirmations.handleMercadoPagoWebhook(req.body, req.headers);
+      const result = await confirmations.handleMercadoPagoWebhook(req.body, req.headers, req.query);
       res.json({ ok: true, ...result });
     })
   );

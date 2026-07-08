@@ -11,26 +11,46 @@ export class BookingConfirmationService {
     private readonly googleCalendar: GoogleCalendarClient
   ) {}
 
-  async handleMercadoPagoWebhook(payload: unknown, headers: Record<string, string | string[] | undefined>): Promise<{ processed: boolean }> {
+  async handleMercadoPagoWebhook(
+    payload: unknown,
+    headers: Record<string, string | string[] | undefined>,
+    query: Record<string, unknown> = {}
+  ): Promise<{ processed: boolean }> {
     const body = payload as { id?: string | number; type?: string; action?: string; data?: { id?: string | number } };
-    const paymentId = String(body.data?.id ?? body.id ?? '');
+    const paymentId = webhookValue(body.data?.id ?? body.id ?? query['data.id'] ?? nestedQueryValue(query.data, 'id'));
     if (!paymentId) {
       throw new ApiError(400, 'missing_payment_id', 'Mercado Pago webhook does not include a payment id');
     }
 
     this.mercadoPago.verifyWebhookSignature(headers, paymentId);
-    const eventKey = `${body.type ?? body.action ?? 'payment'}:${paymentId}`;
+    const eventType = webhookValue(body.type ?? body.action ?? query.type ?? query.action) || 'payment';
+    const eventPayload = {
+      ...body,
+      data: {
+        ...body.data,
+        id: paymentId
+      },
+      type: body.type ?? webhookValue(query.type),
+      action: body.action ?? webhookValue(query.action),
+      query
+    };
+    const eventKey = `${eventType}:${paymentId}`;
     const event = await this.repository.createWebhookEvent({
       provider: 'mercadopago',
       event_key: eventKey,
       processed_at: null,
-      raw_payload: body as Record<string, unknown>
+      raw_payload: eventPayload
     });
     if (!event) {
       return { processed: false };
     }
 
-    const mercadoPayment = await this.mercadoPago.getPayment(paymentId);
+    if (isMercadoPagoDashboardTest(paymentId, eventType)) {
+      await this.repository.markWebhookProcessed(event.id);
+      return { processed: false };
+    }
+
+    const mercadoPayment = await this.getMercadoPagoPayment(paymentId);
     const preReservationId = mercadoPayment.externalReference;
     if (!preReservationId) {
       throw new ApiError(400, 'missing_external_reference', 'Mercado Pago payment has no external_reference');
@@ -106,4 +126,47 @@ export class BookingConfirmationService {
 
     return { processed: true };
   }
+
+  private async getMercadoPagoPayment(paymentId: string) {
+    try {
+      return await this.mercadoPago.getPayment(paymentId);
+    } catch (error) {
+      throw new ApiError(502, 'mercadopago_error', mercadoPagoErrorMessage(error), error);
+    }
+  }
+}
+
+function webhookValue(value: unknown): string {
+  if (typeof value === 'string' || typeof value === 'number') {
+    return String(value);
+  }
+  if (Array.isArray(value)) {
+    return webhookValue(value[0]);
+  }
+  return '';
+}
+
+function nestedQueryValue(value: unknown, key: string): unknown {
+  if (value && typeof value === 'object' && key in value) {
+    return (value as Record<string, unknown>)[key];
+  }
+  return undefined;
+}
+
+function isMercadoPagoDashboardTest(paymentId: string, eventType: string): boolean {
+  return eventType === 'payment' && paymentId === '123456';
+}
+
+function mercadoPagoErrorMessage(error: unknown): string {
+  if (error && typeof error === 'object') {
+    const record = error as Record<string, unknown>;
+    const message = webhookValue(record.message ?? record.error);
+    if (message) {
+      return `Mercado Pago request failed: ${message}`;
+    }
+  }
+  if (error instanceof Error && error.message) {
+    return `Mercado Pago request failed: ${error.message}`;
+  }
+  return 'Mercado Pago request failed';
 }
